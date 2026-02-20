@@ -37,7 +37,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     }
 
     java.util.List<Note> notes = new ArrayList<>();
-    long startTime;
+    Sequencer sequencer;
 
     // --- Input mapping ---
     Map<Integer, Integer> keyToLane = Map.of(
@@ -53,10 +53,14 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         requestFocus();
         try {
             notes = loadMidi("assets/midi/MiraiGlideDotCommie.mid");
+            sequencer = MidiSystem.getSequencer();
+            sequencer.open();
+            Sequence sequence = MidiSystem.getSequence(new java.io.File("assets/midi/MiraiGlideDotCommie.mid"));
+            sequencer.setSequence(sequence);
+            sequencer.start();
         } catch (Exception e) {
             e.printStackTrace();
         }
-        startTime = System.currentTimeMillis();
     }
 
     public static java.util.List<Note> loadMidi(String filename) {
@@ -111,7 +115,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     }
 
     public void updateNotes() {
-        long now = System.currentTimeMillis() - startTime;
+        if (sequencer == null || !sequencer.isOpen()) return;
+        long now = sequencer.getMicrosecondPosition() / 1000;
         for (Note n : notes) {
             if (!n.hit && now > n.hitTimeMs + 500) { // missed
                 System.out.println("Lane " + n.lane + ": MISS");
@@ -131,7 +136,10 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         }
 
         // Draw notes
-        long now = System.currentTimeMillis() - startTime;
+        long now = 0;
+        if (sequencer != null && sequencer.isOpen()) {
+            now = sequencer.getMicrosecondPosition() / 1000;
+        }
         for (Note n : notes) {
             if (!n.hit) {
                 g.setColor(Color.CYAN);
@@ -146,7 +154,10 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     }
 
     public void keyPressed(KeyEvent e) {
-        long now = System.currentTimeMillis() - startTime;
+        long now = 0;
+        if (sequencer != null && sequencer.isOpen()) {
+            now = sequencer.getMicrosecondPosition() / 1000;
+        }
         Integer lane = keyToLane.get(e.getKeyCode());
         if (lane == null) return;
 
@@ -183,6 +194,16 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         frame.pack();
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setVisible(true);
+
+        // Add a window listener to stop and close sequencer on close
+        frame.addWindowListener(new java.awt.event.WindowAdapter() {
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                if (canvas.sequencer != null && canvas.sequencer.isOpen()) {
+                    canvas.sequencer.stop();
+                    canvas.sequencer.close();
+                }
+            }
+        });
 
         // Main update loop
         Timer timer = new Timer(1000/FPS, e -> {
