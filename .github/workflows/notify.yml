@@ -1,0 +1,18 @@
+name: Engine Commit Notify
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord Notification
+        uses: Ilshidur/action-discord@v2
+        with:
+          webhook: ${{ secrets.DISCORD_ENGINE_WEBHOOK }}
+          message: |
+            ⚙️ New engine commit by ${{ github.actor }}!
+            ${{ github.event.head_commit.message }}
+            ${{ github.event.head_commit.url }}
