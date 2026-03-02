@@ -2,17 +2,19 @@ name: Engine Commit Notify
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]  # change if you want a different branch
 
 jobs:
   notify:
     runs-on: ubuntu-latest
+
     steps:
       - name: Send Discord Notification
-        uses: Ilshidur/action-discord@v2
+        uses: snorrwe/discord-action@v1.0.10
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          discord_token: ${{ secrets.DISCORD_BOT_TOKEN }}
+          discord_channel: 1478116365800964279  # Replace with your 📢engine-dev channel ID
           message: |
-            ⚙️ New engine commit by ${{ github.actor }}!
-            ${{ github.event.head_commit.message }}
-            ${{ github.event.head_commit.url }}
+            ⚙️ **New engine commit by** ${{ github.actor }}!
+            📝 Message: ${{ github.event.head_commit.message }}
+            🔗 [View commit](${{ github.event.head_commit.url }})
