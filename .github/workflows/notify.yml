@@ -2,19 +2,19 @@ name: Engine Commit Notify
 
 on:
   push:
-    branches: [ main ]  # change if you want a different branch
+    branches: [ main ]
 
 jobs:
   notify:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send Discord Notification
-        uses: snorrwe/discord-action@v1.0.10
+      - name: Discord Webhook Notification
+        uses: johnnyhuy/actions-discord-git-webhook@v1.0.0
         with:
-          discord_token: ${{ secrets.DISCORD_BOT_TOKEN }}
-          discord_channel: 1478116365800964279  # Replace with your 📢engine-dev channel ID
-          message: |
-            ⚙️ **New engine commit by** ${{ github.actor }}!
-            📝 Message: ${{ github.event.head_commit.message }}
-            🔗 [View commit](${{ github.event.head_commit.url }})
+          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}  # your engine channel webhook
+          repo_name: "magic-charts"
+          censor_username: false
+          hide_links: false
+          color: 7dbbe6
+          
