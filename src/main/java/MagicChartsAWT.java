@@ -4,17 +4,22 @@ import java.awt.Graphics;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import javax.swing.*;
-import javax.swing.Timer;
 import javax.sound.midi.*;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.*;
-import javax.swing.*;
-import javax.swing.Timer;
-import javax.sound.midi.*;
+import java.util.Random;
+import java.util.Set;
 
 public class MagicChartsAWT extends Canvas implements KeyListener {
-
+    enum Difficulty {
+        EASY,
+        NORMAL,
+        HARD
+    }
     // --- Config ---
     static final int WIDTH = 400;
     static final int HEIGHT = 600;
@@ -23,8 +28,39 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     static final int NOTE_HEIGHT = 20;
     static final int HIT_LINE_Y = HEIGHT - 100;
     static final int FPS = 60;
+    // Beat-locked approach time (6 beats at 149 BPM)
+    static final long APPROACH_TIME_MS =
+            (long)((60000.0 / 149.0) * 6);
+    static final long MAX_HIT_WINDOW_MS = 250;
+    static final long PERFECT_WINDOW_MS = 110;
+    static final long MISS_WINDOW_MS = 250;
 
     // --- Engine data ---
+    // --- Judgement display ---
+    String judgementText = "";
+    long judgementTimer = 0;
+    static final long JUDGEMENT_DISPLAY_MS = 500;
+
+    // --- Character / hit animation ---
+    java.awt.Image spriteGo = null;
+    java.awt.Image spriteHit = null;
+    boolean hitPose = false;
+    long hitPoseTimer = 0;
+    static final long HIT_POSE_DURATION_MS = 150;
+
+    int characterX = WIDTH / 2; // lateral position
+    int characterY = HIT_LINE_Y - 64 - 10;
+    String hitText = "";
+    long hitTextTimer = 0;
+    static final long HIT_TEXT_DURATION_MS = 500;
+
+    // --- Count-in ---
+    String[] beatText = {"ONE","TWO","ONE","TWO","THREE","FOUR"};
+    long lastBeatTime = 0;
+    int beatIndex = 0;
+    static long msPerBeat = (long)(60000.0 / 149.0); // BPM
+    boolean countingIn = true;
+    static final long COUNT_IN_DURATION_MS = msPerBeat * 6;
     static class Note {
         long hitTimeMs;
         int lane;
@@ -33,18 +69,24 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         long approachTime;
 
         public Note(long hitTimeMs, int lane) {
-            this.approachTime = 2000; // approachTime = 2000 ms
+            this.approachTime = APPROACH_TIME_MS;
             this.hitTimeMs = hitTimeMs;
             this.lane = lane;
             this.spawnTimeMs = hitTimeMs - approachTime;
-            // Removed clamp to 0 to allow negative spawnTimeMs
         }
     }
 
-    java.util.List<Note> notes = new ArrayList<>();
+    List<Note> notes = new ArrayList<>();
     Sequencer sequencer;
     javax.sound.sampled.Clip audioClip = null;
     long startTime = 0;
+
+    // --- Scoring ---
+    int combo = 0;
+    int maxCombo = 0;
+    int perfectCount = 0;
+    int goodCount = 0;
+    int missCount = 0;
 
     // --- Input mapping ---
     Map<Integer, Integer> keyToLane = Map.of(
@@ -55,67 +97,76 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     );
 
     public MagicChartsAWT() {
-        this(false, null, 120); // default: use MIDI
+        this(false, null, 120);
     }
 
-    // New constructor to allow autocharting from audio
     public MagicChartsAWT(boolean useAutochart, String audioFile, int bpm) {
         addKeyListener(this);
         setFocusable(true);
-        requestFocus();
+        requestFocusInWindow();
+
+        // Load character sprites
+        try {
+            spriteGo = javax.imageio.ImageIO.read(new java.io.File("assets/sprites/sprite_go.png"));
+            spriteHit = javax.imageio.ImageIO.read(new java.io.File("assets/sprites/sprite_hit.png"));
+        } catch (Exception e) { e.printStackTrace(); }
+
         try {
             if (useAutochart && audioFile != null) {
-                // Get notes and the time of the first note (after normalization)
-                java.util.List<Note> loadedNotes = autoChartFromAudio(audioFile, bpm);
-                // Find the minimum hitTimeMs (the first note)
-                long minHitTime = Long.MAX_VALUE;
+                List<Note> loadedNotes = autoChartFromAudio(audioFile, bpm);
+
+                long rawFirstHit = Long.MAX_VALUE;
                 for (Note n : loadedNotes) {
-                    if (n.hitTimeMs < minHitTime) minHitTime = n.hitTimeMs;
+                    if (n.hitTimeMs < rawFirstHit) rawFirstHit = n.hitTimeMs;
                 }
-                // Normalize so that first note is at pre-spawn buffer (e.g., 0)
-                long preSpawnBuffer = 1500;
-                long offset = minHitTime - preSpawnBuffer;
-                if (offset > 0 && loadedNotes.size() > 0) {
-                    for (Note n : loadedNotes) {
-                        n.hitTimeMs -= offset;
-                        n.spawnTimeMs = n.hitTimeMs - n.approachTime;
-                    }
+
+                long shift = APPROACH_TIME_MS - rawFirstHit;
+                for (Note n : loadedNotes) {
+                    n.hitTimeMs += shift;
+                    n.spawnTimeMs = n.hitTimeMs - APPROACH_TIME_MS;
                 }
-                notes = adjustLanesForSpacing(loadedNotes, 150); // 150 ms minimum spacing per lane
-                sequencer = null; // No MIDI sequencer
-                // Prepare audio playback using Clip, and set frame position to match normalized first note
-                javax.sound.sampled.AudioInputStream ais = javax.sound.sampled.AudioSystem.getAudioInputStream(new java.io.File(audioFile));
-                javax.sound.sampled.AudioFormat format = ais.getFormat();
+
+                notes = adjustLanesForSpacing(loadedNotes, 150);
+                notes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+
+                javax.sound.sampled.AudioInputStream ais =
+                        javax.sound.sampled.AudioSystem.getAudioInputStream(new java.io.File(audioFile));
                 audioClip = javax.sound.sampled.AudioSystem.getClip();
                 audioClip.open(ais);
-                // If offset > 0, skip audio forward by offset ms to synchronize with first note
-                if (offset > 0) {
-                    // Calculate frame to skip to
-                    long skipMicroseconds = offset * 1000;
-                    // Use setMicrosecondPosition (Clip granularity is usually good enough)
-                    audioClip.setMicrosecondPosition(skipMicroseconds);
-                } else {
-                    audioClip.setMicrosecondPosition(0);
-                }
-                audioClip.start();
+
+                long audioDelayMs = rawFirstHit < 0 ? 0 : rawFirstHit;
                 startTime = System.currentTimeMillis();
+
+                if (audioDelayMs > 0) {
+                    Timer audioStartTimer = new Timer((int) audioDelayMs, evt -> {
+                        if (audioClip != null && !audioClip.isRunning()) {
+                            audioClip.start();
+                        }
+                    });
+                    audioStartTimer.setRepeats(false);
+                    audioStartTimer.start();
+                } else {
+                    audioClip.start();
+                }
             } else {
-                notes = loadMidi("assets/midi/MiraiGlideDotCommie.mid");
+                notes = loadMidi("assets/midi/wornouttapes.mid", Difficulty.NORMAL);
+                notes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+
                 sequencer = MidiSystem.getSequencer();
                 sequencer.open();
-                Sequence sequence = MidiSystem.getSequence(new java.io.File("assets/midi/MiraiGlideDotCommie.mid"));
+                Sequence sequence = MidiSystem.getSequence(new java.io.File("assets/midi/wornouttapes.mid"));
                 sequencer.setSequence(sequence);
                 sequencer.start();
+                startTime = System.currentTimeMillis();
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
-    // --- Java-only autocharting from audio (WAV) ---
-    public static java.util.List<Note> autoChartFromAudio(String file, int BPM) {
-        java.util.List<Note> notes = new ArrayList<>();
+
+    public static List<Note> autoChartFromAudio(String file, int BPM) {
+        List<Note> notes = new ArrayList<>();
         try {
-            // Read WAV file
             javax.sound.sampled.AudioInputStream ais = javax.sound.sampled.AudioSystem.getAudioInputStream(new java.io.File(file));
             javax.sound.sampled.AudioFormat format = ais.getFormat();
             boolean isBigEndian = format.isBigEndian();
@@ -123,155 +174,148 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             int channels = format.getChannels();
             float sampleRate = format.getSampleRate();
             int frameSize = format.getFrameSize();
-            // Read all audio data into a byte array
+
             byte[] audioBytes = ais.readAllBytes();
             int totalFrames = audioBytes.length / frameSize;
-            // Compute mono amplitude envelope (simple RMS in windows)
-            int windowSize = (int)(sampleRate * 0.02); // 20ms window
-            double[] envelope = new double[totalFrames / windowSize];
+
+            int windowSize = (int)(sampleRate * 0.02); // 20ms
+            double[] envelope = new double[totalFrames / windowSize + 1];
+
             for (int w = 0; w < envelope.length; w++) {
                 double sum = 0;
                 int count = 0;
                 int frameStart = w * windowSize;
                 int frameEnd = Math.min((w + 1) * windowSize, totalFrames);
                 for (int f = frameStart; f < frameEnd; f++) {
-                    int sampleIndex = f * frameSize;
-                    // Take only first channel for mono
+                    int idx = f * frameSize;
                     int sample = 0;
                     if (bytesPerSample == 2) {
-                        int low = audioBytes[sampleIndex] & 0xFF;
-                        int high = audioBytes[sampleIndex + 1] & 0xFF;
-                        if (isBigEndian) {
-                            sample = (high << 8) | low;
-                        } else {
-                            sample = (low | (high << 8));
-                        }
-                        // Signed 16-bit
+                        int low = audioBytes[idx] & 0xFF;
+                        int high = audioBytes[idx + 1] & 0xFF;
+                        sample = isBigEndian ? (high << 8) | low : (low << 8) | high;
                         if (sample > 32767) sample -= 65536;
                     } else if (bytesPerSample == 1) {
-                        sample = audioBytes[sampleIndex];
+                        sample = (audioBytes[idx] & 0xFF) - 128;
                     }
-                    sum += sample * sample;
+                    sum += sample * (double) sample;
                     count++;
                 }
-                if (count > 0) envelope[w] = Math.sqrt(sum / count);
-                else envelope[w] = 0;
+                envelope[w] = count > 0 ? Math.sqrt(sum / count) : 0;
             }
-            // Normalize envelope
-            double max = 0;
-            for (double v : envelope) if (v > max) max = v;
-            if (max > 0) for (int i = 0; i < envelope.length; i++) envelope[i] /= max;
-            // Peak detection: simple threshold and local maximum
-            // Adaptive threshold based on average energy
-            double avg = 0;
-            for (double v : envelope) avg += v;
-            avg /= Math.max(1, envelope.length);
-            double threshold = Math.max(0.02, avg * 1.5);
-            java.util.List<Integer> peakWindows = new ArrayList<>();
+
+            // Normalize
+            double maxEnv = 0;
+            for (double v : envelope) if (v > maxEnv) maxEnv = v;
+            if (maxEnv > 0) {
+                for (int i = 0; i < envelope.length; i++) envelope[i] /= maxEnv;
+            }
+
+            // === ENVELOPE DEBUG ===
+            double sumEnv = 0;
+            int nonZeroCount = 0;
+            for (double v : envelope) {
+                sumEnv += v;
+                if (v > 0.0001) nonZeroCount++;
+            }
+            double avgEnv = envelope.length > 0 ? sumEnv / envelope.length : 0;
+
+            double p90 = 0;
+            if (envelope.length > 0) {
+                double[] sorted = envelope.clone();
+                java.util.Arrays.sort(sorted);
+                int idx = (int) (0.9 * (sorted.length - 1));
+                p90 = sorted[idx];
+            }
+
+            System.out.println("=== ENVELOPE DEBUG ===");
+            System.out.println("length: " + envelope.length);
+            System.out.println("max normalized: " + String.format("%.6f", maxEnv));
+            System.out.println("avg normalized: " + String.format("%.6f", avgEnv));
+            System.out.println("90th percentile: " + String.format("%.6f", p90));
+            System.out.println("non-zero windows (>0.0001): " + nonZeroCount + " / " + envelope.length);
+            System.out.println("rough song duration (seconds): " + String.format("%.1f", (envelope.length * 0.020)));
+
+            // Peak detection - patched: lower threshold + no strict local max
+            double threshold = 0.04;  // ← main tuning knob - lower = more notes, higher = cleaner
+            System.out.println("Using forced threshold: " + String.format("%.6f", threshold));
+
+            List<Integer> peaks = new ArrayList<>();
             for (int i = 1; i < envelope.length - 1; i++) {
-                if (envelope[i] > threshold && envelope[i] > envelope[i-1] && envelope[i] > envelope[i+1]) {
-                    peakWindows.add(i);
+                if (envelope[i] > threshold) {
+                    peaks.add(i);
+                    i += 4;  // skip ahead to reduce dense clusters
                 }
             }
-            System.out.println("Detected raw peaks: " + peakWindows.size());
-            for (int i = 0; i < Math.min(10, peakWindows.size()); i++) {
-                System.out.println("Peak window idx=" + peakWindows.get(i));
-            }
-            // Snap peaks to nearest beat (no arbitrary spacing, just strict BPM grid)
+            System.out.println("raw peaks detected: " + peaks.size());
+
             double msPerBeat = 60000.0 / BPM;
-            java.util.Set<Long> snappedTimes = new java.util.HashSet<>();
-            for (int idx : peakWindows) {
+            Set<Long> snapped = new HashSet<>();
+            for (int idx : peaks) {
                 double timeMs = idx * windowSize * 1000.0 / sampleRate;
-                long snapped = Math.round(timeMs / msPerBeat) * (long) msPerBeat;
-                snappedTimes.add(snapped);
+                long beatIdx = Math.round(timeMs / msPerBeat);
+                long snappedMs = (long) Math.round(beatIdx * msPerBeat);
+                snapped.add(snappedMs);
             }
-            // Sort snapped times
-            java.util.List<Long> sortedTimes = new ArrayList<>(snappedTimes);
-            java.util.Collections.sort(sortedTimes);
-            System.out.println("Snapped note count before filter: " + sortedTimes.size());
-            for (int i = 0; i < Math.min(10, sortedTimes.size()); i++) {
-                System.out.println("Snapped time " + i + " = " + sortedTimes.get(i));
-            }
-            // Filter notes to enforce minimum time separation (e.g., 100 ms)
-            long minSeparationMs = 100;
-            java.util.List<Long> filteredTimes = new ArrayList<>();
-            long lastTime = -minSeparationMs - 1;
-            for (long t : sortedTimes) {
-                if (t - lastTime >= minSeparationMs) {
-                    filteredTimes.add(t);
-                    lastTime = t;
+
+            List<Long> sorted = new ArrayList<>(snapped);
+            sorted.sort(Long::compareTo);
+
+            // Min separation - reduced
+            long minSep = 60;
+            List<Long> filtered = new ArrayList<>();
+            long last = -minSep - 1;
+            for (long t : sorted) {
+                if (t - last >= minSep) {
+                    filtered.add(t);
+                    last = t;
                 }
             }
-            // Add pre-spawn buffer so first note spawns offscreen and is hittable
-            // (Normalization to 0 will be done in the constructor)
-            long preSpawnBuffer = 1500;
-            for (int i = 0; i < filteredTimes.size(); i++) {
-                filteredTimes.set(i, filteredTimes.get(i) + preSpawnBuffer);
-            }
-            // Assign lanes: randomly distributed for a bit more variety
-            java.util.List<Integer> lanes = new ArrayList<>();
-            java.util.Random rng = new java.util.Random(0);
-            for (int i = 0; i < filteredTimes.size(); i++) {
-                lanes.add(rng.nextInt(LANES));
-            }
-            // Adjust lanes to prevent exact-lane collision at same hit time
-            Map<Long, Set<Integer>> usedLanesAtTime = new HashMap<>();
-            for (int i = 0; i < filteredTimes.size(); i++) {
-                long t = filteredTimes.get(i);
-                int assignedLane = lanes.get(i);
-                Set<Integer> used = usedLanesAtTime.getOrDefault(t, new HashSet<>());
-                if (used.contains(assignedLane)) {
-                    // Find next available lane for this time
+
+            // Random lanes + same-time fix
+            Random rng = new Random(42);
+            Map<Long, Set<Integer>> usedAtTime = new HashMap<>();
+            for (long t : filtered) {
+                int lane = rng.nextInt(LANES);
+                Set<Integer> used = usedAtTime.computeIfAbsent(t, k -> new HashSet<>());
+                if (used.contains(lane)) {
                     for (int l = 0; l < LANES; l++) {
                         if (!used.contains(l)) {
-                            assignedLane = l;
+                            lane = l;
                             break;
                         }
                     }
                 }
-                used.add(assignedLane);
-                usedLanesAtTime.put(t, used);
-                notes.add(new Note(t, assignedLane));
+                used.add(lane);
+                notes.add(new Note(t, lane));
             }
-            // Debug print for first few notes
-            System.out.println("Final autochart notes: " + notes.size());
-            for (int i = 0; i < Math.min(10, notes.size()); i++) {
-                Note n = notes.get(i);
-                System.out.println("Note " + i + " -> time=" + n.hitTimeMs + " lane=" + n.lane);
-            }
+
+            System.out.println("Autochart generated " + notes.size() + " notes");
         } catch (Exception e) {
             e.printStackTrace();
         }
         return notes;
     }
 
-    // Adjust lanes only to prevent exact-lane collisions at the same hit time (does not modify hit times or compress spacing).
-    private static java.util.List<Note> adjustLanesForSpacing(java.util.List<Note> inputNotes, long minSpacingMs) {
-        // Sort notes by hitTimeMs
-        inputNotes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
-        Map<Long, Set<Integer>> usedLanesAtTime = new HashMap<>();
-        for (Note n : inputNotes) {
-            Set<Integer> used = usedLanesAtTime.getOrDefault(n.hitTimeMs, new HashSet<>());
-            int origLane = n.lane;
-            int assignedLane = origLane;
-            if (used.contains(origLane)) {
-                // Find next available lane for this time
+    private static List<Note> adjustLanesForSpacing(List<Note> input, long minSpacingMs) {
+        input.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+        Map<Long, Set<Integer>> used = new HashMap<>();
+        for (Note n : input) {
+            Set<Integer> u = used.computeIfAbsent(n.hitTimeMs, k -> new HashSet<>());
+            if (u.contains(n.lane)) {
                 for (int l = 0; l < LANES; l++) {
-                    if (!used.contains(l)) {
-                        assignedLane = l;
+                    if (!u.contains(l)) {
+                        n.lane = l;
                         break;
                     }
                 }
             }
-            n.lane = assignedLane;
-            used.add(assignedLane);
-            usedLanesAtTime.put(n.hitTimeMs, used);
+            u.add(n.lane);
         }
-        return inputNotes;
+        return input;
     }
 
-    public static java.util.List<Note> loadMidi(String filename) {
-        java.util.List<Note> loadedNotes = new ArrayList<>();
+    public static List<Note> loadMidi(String filename, Difficulty difficulty) {
+        List<Note> loadedNotes = new ArrayList<>();
         try {
             Sequence sequence = MidiSystem.getSequence(new java.io.File(filename));
             int minPitch = Integer.MAX_VALUE;
@@ -279,7 +323,6 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             List<MidiEvent> noteEvents = new ArrayList<>();
             int resolution = sequence.getResolution();
 
-            // First pass: find min and max pitch
             for (Track track : sequence.getTracks()) {
                 for (int i = 0; i < track.size(); i++) {
                     MidiEvent event = track.get(i);
@@ -296,12 +339,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                 }
             }
 
-            if (minPitch > maxPitch) {
-                // No notes found, return empty list
-                return loadedNotes;
-            }
+            if (minPitch > maxPitch) return loadedNotes;
 
-            // Calculate pitch range and lane size
             int pitchRange = maxPitch - minPitch + 1;
             int laneSize = Math.max(1, pitchRange / LANES);
 
@@ -309,12 +348,62 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                 ShortMessage sm = (ShortMessage) event.getMessage();
                 int pitch = sm.getData1();
                 int lane = (pitch - minPitch) / laneSize;
-                if (lane >= LANES) lane = LANES - 1; // Clamp lane to max
+                if (lane >= LANES) lane = LANES - 1;
                 long tick = event.getTick();
-                // Convert tick to milliseconds
-                long ms = (long)((tick * 60000.0) / (resolution * 120)); // assuming 120 bpm
+                long ms = (long) ((tick * 60000.0) / (resolution * 120));
                 loadedNotes.add(new Note(ms, lane));
             }
+
+            loadedNotes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+
+            // --- Difficulty Filtering ---
+            long minSpacing;
+            int maxChordSize;
+
+            switch (difficulty) {
+                case EASY -> {
+                    minSpacing = 250;
+                    maxChordSize = 1;
+                }
+                case NORMAL -> {
+                    minSpacing = 150;
+                    maxChordSize = 2;
+                }
+                case HARD -> {
+                    minSpacing = 80;
+                    maxChordSize = LANES;
+                }
+                default -> {
+                    minSpacing = 150;
+                    maxChordSize = 2;
+                }
+            }
+
+            // Enforce minimum spacing
+            List<Note> spacingFiltered = new ArrayList<>();
+            long lastTime = -9999;
+            for (Note n : loadedNotes) {
+                if (n.hitTimeMs - lastTime >= minSpacing) {
+                    spacingFiltered.add(n);
+                    lastTime = n.hitTimeMs;
+                }
+            }
+
+            // Limit chord size
+            Map<Long, List<Note>> byTime = new HashMap<>();
+            for (Note n : spacingFiltered) {
+                byTime.computeIfAbsent(n.hitTimeMs, k -> new ArrayList<>()).add(n);
+            }
+
+            List<Note> finalNotes = new ArrayList<>();
+            for (List<Note> group : byTime.values()) {
+                group.sort(Comparator.comparingInt(n -> n.lane));
+                for (int i = 0; i < Math.min(maxChordSize, group.size()); i++) {
+                    finalNotes.add(group.get(i));
+                }
+            }
+
+            loadedNotes = finalNotes;
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -322,93 +411,186 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     }
 
     public void updateNotes() {
-        long now;
-        if (sequencer != null && sequencer.isOpen()) {
-            now = sequencer.getMicrosecondPosition() / 1000;
-        } else {
-            now = System.currentTimeMillis() - startTime;
-        }
-        int missWindow = 500; // ms after hit line to mark miss
-        for (Note n : notes) {
-            if (!n.hit) {
-                // Only mark as missed if note has spawned (now >= n.spawnTimeMs) and has passed the hit line plus the miss window
-                if (now >= n.spawnTimeMs && (now - n.hitTimeMs > missWindow)) {
-                    System.out.println("Lane " + n.lane + ": MISS");
-                    n.hit = true;
-                }
+        long now = getCurrentTimeMs();
+        // --- Count-in logic ---
+        if (countingIn) {
+            long sysNow = System.currentTimeMillis();
+            if (sysNow - lastBeatTime >= msPerBeat) {
+                lastBeatTime = sysNow;
+                System.out.println(beatText[beatIndex % beatText.length]);
+                hitText = beatText[beatIndex % beatText.length];
+                hitTextTimer = sysNow;
+                beatIndex++;
             }
+            if (sysNow - startTime >= COUNT_IN_DURATION_MS) {
+                countingIn = false;
+            }
+        }
+        for (Note n : notes) {
+            if (!n.hit && now - n.hitTimeMs > MISS_WINDOW_MS) {
+                n.hit = true;
+                combo = 0;
+                missCount++;
+                System.out.println("MISS (auto)");
+                printScoreStats();
+                judgementText = "MISS";
+                judgementTimer = System.currentTimeMillis();
+                // Sprite swap and WHACK text for auto-miss
+                hitPose = true;
+                hitPoseTimer = System.currentTimeMillis();
+                hitTextTimer = System.currentTimeMillis();
+                hitText = "WHACK!\nMISS";
+            }
+        }
+    }
+
+    private long getCurrentTimeMs() {
+        if (sequencer != null && sequencer.isOpen()) {
+            return sequencer.getMicrosecondPosition() / 1000;
+        } else {
+            return System.currentTimeMillis() - startTime;
         }
     }
 
     public void paint(Graphics g) {
         g.setColor(Color.BLACK);
-        g.fillRect(0,0,WIDTH,HEIGHT);
+        g.fillRect(0, 0, WIDTH, HEIGHT);
 
-        // Draw lanes
-        for (int i=0;i<LANES;i++) {
+        for (int i = 0; i < LANES; i++) {
             g.setColor(Color.DARK_GRAY);
-            g.fillRect(i*NOTE_WIDTH,0,NOTE_WIDTH,HEIGHT);
+            g.fillRect(i * NOTE_WIDTH, 0, NOTE_WIDTH, HEIGHT);
         }
 
-        // Draw notes
-        long now = 0;
-        if (sequencer != null && sequencer.isOpen()) {
-            now = sequencer.getMicrosecondPosition() / 1000;
-        } else {
-            now = System.currentTimeMillis() - startTime;
-        }
-        // Improved note scrolling: scale Y position by scrollSpeedFactor, draw only visible notes
-        double scrollSpeedFactor = (double)(HIT_LINE_Y + NOTE_HEIGHT) / 2000.0; // 2000 ms approach time
-        int visibleMargin = 200; // pixels above and below hit line to consider visible
+        long now = getCurrentTimeMs();
+        double scrollSpeed = (double) (HIT_LINE_Y + NOTE_HEIGHT) / APPROACH_TIME_MS;
+
         for (Note n : notes) {
-            if (!n.hit) {
+            if (n.hit) continue;
+            if (now < n.spawnTimeMs) continue;
+
+            int y = HIT_LINE_Y - (int) ((n.hitTimeMs - now) * scrollSpeed);
+            if (y > -NOTE_HEIGHT - 300 || y < HEIGHT + 300) {
                 g.setColor(Color.CYAN);
-                // Only draw notes that have spawned (i.e., now >= n.spawnTimeMs)
-                if (now >= n.spawnTimeMs) {
-                    int y = HIT_LINE_Y - (int)((n.hitTimeMs - now) * scrollSpeedFactor);
-                    // Only draw notes that are within a visible range above and below the hit line
-                    if (y > -NOTE_HEIGHT - visibleMargin && y < HEIGHT + visibleMargin) {
-                        g.fillRect(n.lane * NOTE_WIDTH, y, NOTE_WIDTH, NOTE_HEIGHT);
-                    }
-                }
+                g.fillRect(n.lane * NOTE_WIDTH, y, NOTE_WIDTH, NOTE_HEIGHT);
             }
         }
 
-        // Draw hit line
         g.setColor(Color.RED);
         g.fillRect(0, HIT_LINE_Y, WIDTH, 5);
+
+        // Draw judgement text above hit line, fading after ~500ms
+        if (!judgementText.isEmpty()) {
+            long elapsed = System.currentTimeMillis() - judgementTimer;
+            if (elapsed <= JUDGEMENT_DISPLAY_MS) {
+                g.setColor(Color.WHITE);
+                g.drawString(judgementText, WIDTH / 2 - 30, HIT_LINE_Y - 30);
+            }
+        }
+
+        // --- Draw character ---
+        if (spriteGo != null && spriteHit != null) {
+            java.awt.Image currentSprite = hitPose ? spriteHit : spriteGo;
+            int charWidth = 64;
+            int charHeight = 64;
+            if (hitPose && System.currentTimeMillis() - hitPoseTimer > HIT_POSE_DURATION_MS) {
+                hitPose = false;
+            }
+            g.drawImage(currentSprite, characterX - charWidth / 2, characterY, charWidth, charHeight, null);
+        }
+
+        // --- Draw hit text ---
+        if (!hitText.isEmpty()) {
+            long elapsed = System.currentTimeMillis() - hitTextTimer;
+            if (elapsed <= HIT_TEXT_DURATION_MS) {
+                g.setColor(Color.WHITE);
+                String[] lines = hitText.split("\n");
+                for (int i = 0; i < lines.length; i++) {
+                    g.drawString(lines[i], characterX - 40, characterY - 10 - i * 15);
+                }
+            }
+        }
     }
 
     public void keyPressed(KeyEvent e) {
-        long now = 0;
-        if (sequencer != null && sequencer.isOpen()) {
-            now = sequencer.getMicrosecondPosition() / 1000;
-        } else {
-            now = System.currentTimeMillis() - startTime;
-        }
+        long now = getCurrentTimeMs();
         Integer lane = keyToLane.get(e.getKeyCode());
         if (lane == null) return;
 
-        Note closest = null;
-        long minOffset = Long.MAX_VALUE;
+        Note candidate = null;
+        long bestOffset = Long.MAX_VALUE;
+
         for (Note n : notes) {
-            if (!n.hit && n.lane == lane) {
-                long offset = Math.abs(n.hitTimeMs - now);
-                if (offset < minOffset) {
-                    minOffset = offset;
-                    closest = n;
-                }
+            if (n.hit || n.lane != lane) continue;
+
+            long offset = Math.abs(n.hitTimeMs - now);
+            if (offset <= MAX_HIT_WINDOW_MS && offset < bestOffset) {
+                candidate = n;
+                bestOffset = offset;
             }
         }
 
-        if (closest != null) {
-            closest.hit = true;
-            if (minOffset <= 110) System.out.println("Lane " + lane + ": PERFECT (" + minOffset + "ms)");
-            else if (minOffset <= 250) System.out.println("Lane " + lane + ": GOOD (" + minOffset + "ms)");
-            else System.out.println("Lane " + lane + ": MISS (" + minOffset + "ms)");
+        if (candidate != null) {
+            candidate.hit = true;
+            long offset = Math.abs(candidate.hitTimeMs - now);
+
+            combo++;
+            if (combo > maxCombo) maxCombo = combo;
+
+            if (offset <= PERFECT_WINDOW_MS) {
+                perfectCount++;
+                System.out.println("PERFECT (" + offset + "ms)");
+            } else {
+                goodCount++;
+                System.out.println("GOOD (" + offset + "ms)");
+            }
+
+            // Set on-screen judgement text
+            judgementText = offset <= PERFECT_WINDOW_MS ? "PERFECT" :
+                            offset <= MAX_HIT_WINDOW_MS ? "GOOD" : "MISS";
+            judgementTimer = System.currentTimeMillis();
+
+            // --- Sprite swap and WHACK text ---
+            hitPose = true;
+            hitPoseTimer = System.currentTimeMillis();
+            hitTextTimer = System.currentTimeMillis();
+            hitText = (offset <= PERFECT_WINDOW_MS ? "WHACK!\nPERFECT (" + offset + "ms)" :
+                       offset <= MAX_HIT_WINDOW_MS ? "WHACK!\nGOOD (" + offset + "ms)" :
+                       "WHACK!\nMISS");
+            if (candidate != null) characterX = candidate.lane * NOTE_WIDTH + NOTE_WIDTH / 2;
+
+            printScoreStats();
+
         } else {
-            System.out.println("Lane " + lane + ": MISS (no note)");
+            combo = 0;
+            missCount++;
+            System.out.println("MISS (no note in window)");
+            // For MISS (no candidate)
+            judgementText = "MISS";
+            judgementTimer = System.currentTimeMillis();
+            // Sprite swap and WHACK text for miss
+            hitPose = true;
+            hitPoseTimer = System.currentTimeMillis();
+            hitTextTimer = System.currentTimeMillis();
+            hitText = "WHACK!\nMISS";
+            printScoreStats();
         }
+    }
+
+    private void printScoreStats() {
+        int totalHits = perfectCount + goodCount + missCount;
+        if (totalHits == 0) return;
+
+        double accuracy = ((perfectCount * 1.0) + (goodCount * 0.7)) / totalHits * 100.0;
+
+        System.out.println(
+                "Combo: " + combo +
+                " | MaxCombo: " + maxCombo +
+                " | Perfect: " + perfectCount +
+                " | Good: " + goodCount +
+                " | Miss: " + missCount +
+                " | Accuracy: " + String.format("%.2f", accuracy) + "%"
+        );
+        System.out.println("--------------------------------------------------");
     }
 
     public void keyReleased(KeyEvent e) {}
@@ -416,33 +598,31 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
     public static void main(String[] args) {
         JFrame frame = new JFrame("MagicCharts AWT");
-        // To use autocharting from audio, set useAutochart to true and provide WAV file and BPM
-        boolean useAutochart = true;
-        String audioFile = "assets/songs/MiraiGlideDotCommie.wav"; // Change as needed
-        int bpm = 140;
+        boolean useAutochart = false;
+        String audioFile = "assets/songs/hasurvoicebeentrulylockedaway.wav";
+        int bpm = 149;
+
         MagicChartsAWT canvas = new MagicChartsAWT(useAutochart, audioFile, bpm);
-        canvas.setSize(WIDTH,HEIGHT);
+        canvas.setSize(WIDTH, HEIGHT);
         frame.add(canvas);
         frame.pack();
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setVisible(true);
 
-        // Add a window listener to stop and close sequencer on close
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             public void windowClosing(java.awt.event.WindowEvent e) {
-                if (canvas.sequencer != null && canvas.sequencer.isOpen()) {
+                if (canvas.sequencer != null) {
                     canvas.sequencer.stop();
                     canvas.sequencer.close();
                 }
-                if (canvas.audioClip != null && canvas.audioClip.isOpen()) {
+                if (canvas.audioClip != null) {
                     canvas.audioClip.stop();
                     canvas.audioClip.close();
                 }
             }
         });
 
-        // Main update loop
-        Timer timer = new Timer(1000/FPS, e -> {
+        Timer timer = new Timer(1000 / FPS, evt -> {
             canvas.updateNotes();
             canvas.repaint();
         });
