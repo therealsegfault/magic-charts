@@ -83,6 +83,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     Font ttfFont = null;
     Font bigFont = null;
     Font hugeFont = null;
+    Font countInFont = null;
 
     // --- Double buffer ---
     BufferedImage offscreen = null;
@@ -196,6 +197,15 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             ttfFont = new Font("SansSerif", Font.BOLD, 24);
             bigFont = new Font("SansSerif", Font.BOLD, 40);
             hugeFont = new Font("SansSerif", Font.BOLD, 64);
+        }
+
+        // Load PermanentMarker for count-in
+        try {
+            countInFont = Font.createFont(Font.TRUETYPE_FONT,
+                    new File("assets/fonts/PermanentMarker_Regular.ttf")).deriveFont(120f);
+            GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(countInFont);
+        } catch (Exception e) {
+            countInFont = hugeFont; // fallback
         }
 
         // Load sprites
@@ -748,18 +758,22 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
         // ── Count-in ──────────────────────────────────────────────
         if (countingIn && beatIndex < beatText.length) {
-            g2.setFont(hugeFont);
             String countStr = beatText[beatIndex % beatText.length];
-            int strW = g2.getFontMetrics().stringWidth(countStr);
-            int cx2 = WIDTH / 2 - strW / 2;
-            int cy2 = HEIGHT / 2;
+            g2.setFont(countInFont);
+            java.awt.FontMetrics fm = g2.getFontMetrics();
+            int strW = fm.stringWidth(countStr);
+            int strH = fm.getAscent();
+            int cx2  = WIDTH  / 2 - strW / 2;
+            int cy2  = HEIGHT / 2 + strH / 2;
             // Glow
-            g2.setColor(new Color(0, 255, 180, 40));
-            for (int ox = -6; ox <= 6; ox += 3)
+            g2.setColor(new Color(0, 255, 180, 35));
+            for (int ox = -8; ox <= 8; ox += 4)
                 g2.drawString(countStr, cx2 + ox, cy2);
+            // Solid
             g2.setColor(new Color(0, 255, 180, 220));
             g2.drawString(countStr, cx2, cy2);
-            g2.setColor(new Color(255, 255, 255, 120));
+            // White core
+            g2.setColor(new Color(255, 255, 255, 100));
             g2.drawString(countStr, cx2, cy2);
         }
 
@@ -855,8 +869,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
         if (sprite != null) {
             int bob = hitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
-            int sw = sprite.getWidth();
-            int sh = sprite.getHeight();
+            int sw = hitPose ? sprite.getWidth()  * 2 : sprite.getWidth();
+            int sh = hitPose ? sprite.getHeight() * 2 : sprite.getHeight();
             g2.drawImage(sprite, cx - sw / 2, cy - sh / 2 + bob, sw, sh, null);
         } else {
             // Fallback if no sprites loaded — simple neon rectangle
