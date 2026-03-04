@@ -91,7 +91,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     BufferedImage offscreen = null;
 
     // --- Background video ---
-    static final String BG_VIDEO_PATH = "assets/video/background.mp4";
+    static final String BG_VIDEO_PATH  = "assets/video/background.mp4";
+    static final String MIDI_AUDIO_PATH = "assets/songs/hasurvoicebeentrulylockedaway.wav";
     MediaPlayer bgPlayer = null;
     MediaView  bgView   = null;
     JFXPanel   jfxPanel = null;   // bootstraps JavaFX runtime
@@ -246,12 +247,27 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             } else {
                 notes = loadMidi("assets/midi/wornouttapes.mid", Difficulty.NORMAL);
                 notes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
-                sequencer = MidiSystem.getSequencer();
+
+                // Open sequencer muted — used only as a clock, not for sound
+                sequencer = MidiSystem.getSequencer(false); // false = don't connect to synth
                 sequencer.open();
                 Sequence sequence = MidiSystem.getSequence(new File("assets/midi/wornouttapes.mid"));
                 sequencer.setSequence(sequence);
-                sequencer.start();
+
+                // Load and play the matching audio track
+                String midiAudio = MIDI_AUDIO_PATH;
+                File audioFile2 = new File(midiAudio);
+                if (audioFile2.exists()) {
+                    javax.sound.sampled.AudioInputStream ais2 =
+                            javax.sound.sampled.AudioSystem.getAudioInputStream(audioFile2);
+                    audioClip = javax.sound.sampled.AudioSystem.getClip();
+                    audioClip.open(ais2);
+                }
+
+                // Start both together as tightly as possible
                 startTime = System.currentTimeMillis();
+                sequencer.start();
+                if (audioClip != null) audioClip.start();
             }
         } catch (Exception e) { e.printStackTrace(); }
 
@@ -354,12 +370,13 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             for (int i = 1; i < envelope.length - 1; i++) {
                 if (envelope[i] > threshold) { peaks.add(i); i += 4; }
             }
-            double msPerBeat = 60000.0 / BPM;
+            double msPerBeat  = 60000.0 / BPM;
+            double msPerSixteenth = msPerBeat / 4.0; // snap to 16th notes, not whole beats
             Set<Long> snapped = new HashSet<>();
             for (int idx : peaks) {
                 double timeMs = idx * windowSize * 1000.0 / sampleRate;
-                long beatIdx = Math.round(timeMs / msPerBeat);
-                long snappedMs = (long) Math.round(beatIdx * msPerBeat);
+                long snapIdx  = Math.round(timeMs / msPerSixteenth);
+                long snappedMs = (long) Math.round(snapIdx * msPerSixteenth);
                 snapped.add(snappedMs);
             }
             List<Long> sorted = new ArrayList<>(snapped);
@@ -370,7 +387,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             for (long t : sorted) {
                 if (t - last >= minSep) { filtered.add(t); last = t; }
             }
-            Random rng = new Random(42);
+            // Seed from filename so same song always gives same chart, but different songs differ
+            Random rng = new Random(file.hashCode());
             Map<Long, Set<Integer>> usedAtTime = new HashMap<>();
             for (long t : filtered) {
                 int lane = rng.nextInt(LANES);
@@ -864,21 +882,13 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         }
         g2.setStroke(new java.awt.BasicStroke(1f));
 
-        // Sprite — swap on Wave's lane (lane 0) PERFECT/GOOD hits only
-        BufferedImage sprite = (waveHitPose && spriteHit != null) ? spriteHit
-                : (spriteGo != null)                 ? spriteGo
-                : null;
-
-        if (sprite != null) {
-            int bob = waveHitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
-            int sw = waveHitPose ? sprite.getWidth()  * 2 : sprite.getWidth();
-            int sh = waveHitPose ? sprite.getHeight() * 2 : sprite.getHeight();
-            g2.drawImage(sprite, cx - sw / 2, cy - sh / 2 + bob, sw, sh, null);
-            // expire
-            if (waveHitPose && System.currentTimeMillis() - waveHitPoseTimer > HIT_POSE_DURATION_MS)
-                waveHitPose = false;
+        // Always show spriteHit
+        if (spriteHit != null) {
+            int sw = spriteHit.getWidth();
+            int sh = spriteHit.getHeight();
+            g2.drawImage(spriteHit, cx - sw / 2, cy - sh / 2, sw, sh, null);
         } else {
-            // Fallback if no sprites loaded — simple neon rectangle
+            // Fallback if no sprite loaded
             g2.setColor(LANE_COLORS[0]);
             g2.setStroke(new java.awt.BasicStroke(2f));
             g2.drawRoundRect(cx - 30, cy - 60, 60, 100, 12, 12);
@@ -1033,7 +1043,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
     public static void main(String[] args) {
         JFrame frame = new JFrame("MagicCharts AWT");
-        boolean useAutochart = false;
+        boolean useAutochart = true;
         String audioFile = "assets/songs/hasurvoicebeentrulylockedaway.wav";
         int bpm = 149;
 
