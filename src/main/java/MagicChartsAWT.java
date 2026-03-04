@@ -17,24 +17,34 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     enum Difficulty { EASY, NORMAL, HARD }
 
     // --- Config ---
-    static final int WIDTH = 400;
-    static final int HEIGHT = 600;
-    static final int LANES = 4;
-    static final int NOTE_WIDTH = 80;
-    static final int NOTE_HEIGHT = 20;
-    static final int HIT_LINE_Y = HEIGHT - 100;
+    static final int WIDTH  = 1280;
+    static final int HEIGHT = 720;
+    static final int LANES  = 4;
+
+    // Side-scroll: lanes are horizontal rows
+    static final int LANE_HEIGHT   = 100;
+    static final int LANE_TOP      = (HEIGHT - LANES * LANE_HEIGHT) / 2;
+    static final int HIT_LINE_X    = 220;
+    static final int NOTE_W        = 54;
+    static final int NOTE_H        = 54;
+
     static final int FPS = 60;
     static final long APPROACH_TIME_MS = (long)((60000.0 / 149.0) * 6);
     static final long MAX_HIT_WINDOW_MS = 250;
     static final long PERFECT_WINDOW_MS = 110;
-    static final long MISS_WINDOW_MS = 250;
+    static final long MISS_WINDOW_MS    = 250;
 
-    // Lane accent colours
     static final Color[] LANE_COLORS = {
-            new Color(0, 220, 255),
-            new Color(255, 80, 200),
-            new Color(120, 255, 80),
-            new Color(255, 200, 40),
+            new Color(  0, 255, 180),   // neon teal
+            new Color(255,  30, 120),   // hot magenta
+            new Color( 40, 160, 255),   // electric blue
+            new Color(255, 200,   0),   // hard yellow
+    };
+    static final Color[] LANE_BG = {
+            new Color(  0,  14,  10),
+            new Color( 14,   0,   8),
+            new Color(  0,   6,  18),
+            new Color( 14,  10,   0),
     };
 
     // --- Judgement display ---
@@ -48,8 +58,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     boolean hitPose = false;
     long hitPoseTimer = 0;
     static final long HIT_POSE_DURATION_MS = 150;
-    int characterX = WIDTH / 2;
-    int characterY = HIT_LINE_Y - 64 - 10;
+    int characterX = HIT_LINE_X / 2;
+    int characterY = HEIGHT / 2;
     String hitText = "";
     long hitTextTimer = 0;
     static final long HIT_TEXT_DURATION_MS = 500;
@@ -64,6 +74,9 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     Font ttfFont = null;
     Font bigFont = null;
     Font hugeFont = null;
+
+    // --- Double buffer ---
+    BufferedImage offscreen = null;
 
     // --- Particles ---
     List<Particle> particles = new ArrayList<>();
@@ -220,12 +233,12 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     }
 
     // ── Sparkle helper ───────────────────────────────────────────
-    private void spawnSparkle(int lane, int y, int count) {
-        float cx = lane * NOTE_WIDTH + NOTE_WIDTH / 2f;
+    private void spawnSparkle(int lane, int x, int count) {
+        int laneY = LANE_TOP + lane * LANE_HEIGHT + LANE_HEIGHT / 2;
         Color base = LANE_COLORS[lane];
         for (int i = 0; i < count; i++) {
             Color c = (i % 2 == 0) ? base : Color.WHITE;
-            particles.add(new Particle(cx, y, c));
+            particles.add(new Particle(x, laneY, c));
         }
     }
 
@@ -430,9 +443,9 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                         perfectCount++;
                         judgementText = "PERFECT HOLD";
                         judgementTimer = System.currentTimeMillis();
-                        double scrollSpeed = (double)(HIT_LINE_Y + NOTE_HEIGHT) / APPROACH_TIME_MS;
-                        int tailY = HIT_LINE_Y - (int)((holdEnd - now) * scrollSpeed);
-                        spawnSparkle(n.lane, tailY, 24);
+                        double scrollSpeed = (double)(WIDTH - HIT_LINE_X + NOTE_W) / APPROACH_TIME_MS;
+                        int tailX = HIT_LINE_X + (int)((holdEnd - now) * scrollSpeed);
+                        spawnSparkle(n.lane, tailX, 24);
 
                     } else if (!stillHeld) {
                         // Released early
@@ -479,121 +492,438 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             return System.currentTimeMillis() - startTime;
     }
 
+    // Prevent AWT from clearing the canvas before paint — eliminates flicker
+    @Override
+    public void update(Graphics g) { paint(g); }
+
     public void paint(Graphics g) {
-        Graphics2D g2 = (Graphics2D) g;
+        // Lazily create offscreen buffer
+        if (offscreen == null || offscreen.getWidth() != WIDTH || offscreen.getHeight() != HEIGHT)
+            offscreen = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_ARGB);
+
+        Graphics2D g2 = offscreen.createGraphics();
         g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
                 java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING,
+                java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+        renderFrame(g2);
+        g2.dispose();
 
-        g2.setColor(Color.BLACK);
+        // Flush the finished frame to screen in one shot
+        g.drawImage(offscreen, 0, 0, null);
+    }
+
+    private void renderFrame(Graphics2D g2) {
+
+        // ── Background: near-black with faint perspective grid ─────
+        g2.setColor(new Color(4, 4, 8));
         g2.fillRect(0, 0, WIDTH, HEIGHT);
 
+        // Perspective scanlines — horizontal, very faint
+        for (int y = 0; y < HEIGHT; y += 4) {
+            g2.setColor(new Color(255, 255, 255, y % 8 == 0 ? 6 : 2));
+            g2.drawLine(0, y, WIDTH, y);
+        }
+        // Vertical grid only in lane area, faint lane-coloured tint
         for (int i = 0; i < LANES; i++) {
-            g2.setColor(Color.DARK_GRAY);
-            g2.fillRect(i * NOTE_WIDTH, 0, NOTE_WIDTH, HEIGHT);
+            Color lc = LANE_COLORS[i];
+            for (int x = HIT_LINE_X; x < WIDTH; x += 60) {
+                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 8));
+                int laneY = LANE_TOP + i * LANE_HEIGHT;
+                g2.drawLine(x, laneY, x, laneY + LANE_HEIGHT);
+            }
         }
 
         long now = getCurrentTimeMs();
-        double scrollSpeed = (double)(HIT_LINE_Y + NOTE_HEIGHT) / APPROACH_TIME_MS;
+        double scrollSpeed = (double)(WIDTH - HIT_LINE_X + NOTE_W) / APPROACH_TIME_MS;
 
-        // --- Draw notes (holds first so heads render on top) ---
+        // ── Lane rows ──────────────────────────────────────────────
+        for (int i = 0; i < LANES; i++) {
+            int laneY = LANE_TOP + i * LANE_HEIGHT;
+            Color lc  = LANE_COLORS[i];
+
+            // Near-black lane bg
+            g2.setColor(LANE_BG[i]);
+            g2.fillRect(HIT_LINE_X, laneY, WIDTH - HIT_LINE_X, LANE_HEIGHT);
+
+            // Hard neon top edge — 2px bright line
+            g2.setColor(lc);
+            g2.setStroke(new java.awt.BasicStroke(2f));
+            g2.drawLine(HIT_LINE_X, laneY, WIDTH, laneY);
+
+            // Soft glow under that edge
+            for (int gx = 1; gx <= 6; gx++) {
+                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(),
+                        Math.max(0, 50 - gx * 8)));
+                g2.drawLine(HIT_LINE_X, laneY + gx, WIDTH, laneY + gx);
+            }
+        }
+        // Bottom edge of last lane
+        Color lastLc = LANE_COLORS[LANES - 1];
+        g2.setColor(lastLc);
+        g2.setStroke(new java.awt.BasicStroke(2f));
+        g2.drawLine(HIT_LINE_X, LANE_TOP + LANES * LANE_HEIGHT,
+                WIDTH,      LANE_TOP + LANES * LANE_HEIGHT);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // ── Hit line ───────────────────────────────────────────────
+        // Multi-pass glow: wide soft → narrow bright
+        int[] glowW   = { 28, 18, 10, 5, 2 };
+        int[] glowA   = {  8, 16, 35, 80, 255 };
+        for (int gi = 0; gi < glowW.length; gi++) {
+            g2.setColor(new Color(255, 255, 255, glowA[gi]));
+            g2.setStroke(new java.awt.BasicStroke(glowW[gi],
+                    java.awt.BasicStroke.CAP_BUTT, java.awt.BasicStroke.JOIN_MITER));
+            g2.drawLine(HIT_LINE_X, LANE_TOP,
+                    HIT_LINE_X, LANE_TOP + LANES * LANE_HEIGHT);
+        }
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // ── Per-lane receptors: diamond shape ─────────────────────
+        for (int i = 0; i < LANES; i++) {
+            int laneY  = LANE_TOP + i * LANE_HEIGHT + LANE_HEIGHT / 2;
+            boolean held = heldLanes.contains(i);
+            Color lc = LANE_COLORS[i];
+            int r = NOTE_W / 2 - 2;
+
+            // Diamond points
+            int[] dx = { HIT_LINE_X,     HIT_LINE_X + r, HIT_LINE_X,     HIT_LINE_X - r };
+            int[] dy = { laneY - r,      laneY,           laneY + r,      laneY           };
+
+            // Glow fill when held
+            if (held) {
+                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 60));
+                int gr = r + 8;
+                int[] gdx = { HIT_LINE_X, HIT_LINE_X+gr, HIT_LINE_X, HIT_LINE_X-gr };
+                int[] gdy = { laneY-gr,   laneY,          laneY+gr,   laneY          };
+                g2.fillPolygon(gdx, gdy, 4);
+            }
+
+            // Fill
+            g2.setColor(held ? lc : new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 40));
+            g2.fillPolygon(dx, dy, 4);
+
+            // Hard neon outline
+            g2.setColor(lc);
+            g2.setStroke(new java.awt.BasicStroke(held ? 2.5f : 1.5f));
+            g2.drawPolygon(dx, dy, 4);
+            g2.setStroke(new java.awt.BasicStroke(1f));
+        }
+
+        // ── Notes ─────────────────────────────────────────────────
         for (Note n : notes) {
-            // Skip fully done notes (but keep active holds visible)
             if (n.hit && !(n.isHold() && n.holdStartMs >= 0 && !n.holdComplete)) continue;
             if (now < n.spawnTimeMs) continue;
 
-            int y = HIT_LINE_Y - (int)((n.hitTimeMs - now) * scrollSpeed);
+            int laneY = LANE_TOP + n.lane * LANE_HEIGHT + LANE_HEIGHT / 2;
+            int nx = HIT_LINE_X + (int)((n.hitTimeMs - now) * scrollSpeed);
+            Color lc = LANE_COLORS[n.lane];
 
             if (n.isHold()) {
-                long holdEnd = n.hitTimeMs + n.durationMs;
-                int tailY = HIT_LINE_Y - (int)((holdEnd - now) * scrollSpeed);
-                tailY = Math.max(tailY, 0);
-
-                int tailX = n.lane * NOTE_WIDTH + NOTE_WIDTH / 4;
-                int tailW = NOTE_WIDTH / 2;
-
-                // Tail body
-                g2.setColor(LANE_COLORS[n.lane].darker());
-                g2.fillRoundRect(tailX, tailY, tailW, y - tailY + NOTE_HEIGHT / 2, 8, 8);
-
-                // Tail end cap
-                g2.setColor(LANE_COLORS[n.lane]);
-                g2.fillOval(tailX - 4, tailY - 4, tailW + 8, 16);
+                long holdEnd   = n.hitTimeMs + n.durationMs;
+                int  tailRight = HIT_LINE_X + (int)((holdEnd - now) * scrollSpeed);
+                tailRight = Math.min(tailRight, WIDTH);
+                int tailH = 10;
+                // Glow bar
+                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 40));
+                g2.fillRect(nx, laneY - tailH - 4, tailRight - nx, tailH * 2 + 8);
+                // Core bar
+                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 180));
+                g2.fillRect(nx, laneY - tailH / 2, tailRight - nx, tailH);
+                // Bright top line
+                g2.setColor(lc);
+                g2.setStroke(new java.awt.BasicStroke(2f));
+                g2.drawLine(nx, laneY - tailH / 2, tailRight, laneY - tailH / 2);
+                g2.setStroke(new java.awt.BasicStroke(1f));
             }
 
-            // Note head
-            if (y > -NOTE_HEIGHT - 300 && y < HEIGHT + 300) {
-                Color noteColor = LANE_COLORS[n.lane];
-                g2.setColor(noteColor);
-                g2.fillRoundRect(n.lane * NOTE_WIDTH + 6, y, NOTE_WIDTH - 12, NOTE_HEIGHT, 12, 12);
-                // Shine
-                g2.setColor(new Color(255, 255, 255, 60));
-                g2.fillRoundRect(n.lane * NOTE_WIDTH + 10, y + 2, NOTE_WIDTH - 20, NOTE_HEIGHT / 2, 8, 8);
-            }
+            if (nx > -NOTE_W - 10 && nx < WIDTH + 10)
+                drawMusicNote(g2, nx, laneY, lc);
         }
 
-        // --- Draw particles ---
+        // ── Particles ─────────────────────────────────────────────
         for (Particle p : new ArrayList<>(particles)) {
             int alpha = Math.max(0, Math.min(255, (int)(p.life * 255)));
-            g2.setColor(new Color(p.color.getRed(), p.color.getGreen(), p.color.getBlue(), alpha));
-            int size = (int)(4 + p.life * 6);
+            Color pc = p.color;
+            // Glow halo
+            g2.setColor(new Color(pc.getRed(), pc.getGreen(), pc.getBlue(), alpha / 5));
+            int gsize = (int)(10 + p.life * 12);
+            g2.fillOval((int)p.x - gsize/2, (int)p.y - gsize/2, gsize, gsize);
+            // Core dot
+            g2.setColor(new Color(pc.getRed(), pc.getGreen(), pc.getBlue(), alpha));
+            int size = (int)(3 + p.life * 4);
             g2.fillOval((int)p.x - size/2, (int)p.y - size/2, size, size);
         }
 
-        // --- Hit line ---
-        g2.setColor(Color.RED);
-        g2.fillRect(0, HIT_LINE_Y, WIDTH, 5);
+        // ── Placeholder character ─────────────────────────────────
+        drawCharacter(g2, now);
 
-        // --- Judgement text ---
+        // ── Judgement text ────────────────────────────────────────
         if (!judgementText.isEmpty()) {
             long elapsed = System.currentTimeMillis() - judgementTimer;
             if (elapsed <= JUDGEMENT_DISPLAY_MS) {
+                float fade = 1f - (float)elapsed / JUDGEMENT_DISPLAY_MS;
+                // Slide upward slightly
+                int jx = HIT_LINE_X + 40;
+                int jy = LANE_TOP - 16 - (int)(fade * 0);
+
+                Color jc = judgementText.contains("PERFECT") ? new Color(  0, 255, 180) :
+                        judgementText.contains("GOOD")    ? new Color( 40, 160, 255) :
+                                new Color(255,  30, 120);
+                int alpha = (int)(fade * 255);
+
+                // Wide glow pass
                 g2.setFont(bigFont);
-                g2.setColor(Color.WHITE);
-                int strW = g2.getFontMetrics().stringWidth(judgementText);
-                g2.drawString(judgementText, WIDTH / 2 - strW / 2, HIT_LINE_Y - 30);
+                g2.setColor(new Color(jc.getRed(), jc.getGreen(), jc.getBlue(), alpha / 5));
+                for (int ox = -4; ox <= 4; ox += 2)
+                    g2.drawString(judgementText, jx + ox, jy);
+
+                // Solid text
+                g2.setColor(new Color(jc.getRed(), jc.getGreen(), jc.getBlue(), alpha));
+                g2.drawString(judgementText, jx, jy);
+
+                // Bright white core
+                g2.setColor(new Color(255, 255, 255, alpha / 3));
+                g2.drawString(judgementText, jx, jy);
             }
         }
 
-        // --- Character sprite ---
-        if (spriteGo != null && spriteHit != null) {
-            BufferedImage currentSprite = hitPose ? spriteHit : spriteGo;
-            if (hitPose && System.currentTimeMillis() - hitPoseTimer > HIT_POSE_DURATION_MS)
-                hitPose = false;
-            g2.drawImage(currentSprite, characterX - 32, characterY, 64, 64, null);
-        }
-
-        // --- Hit text ---
-        if (!hitText.isEmpty()) {
-            long elapsed = System.currentTimeMillis() - hitTextTimer;
-            if (elapsed <= HIT_TEXT_DURATION_MS) {
-                g2.setFont(hugeFont);
-                g2.setColor(Color.WHITE);
-                String[] lines = hitText.split("\n");
-                for (int i = 0; i < lines.length; i++) {
-                    int strW = g2.getFontMetrics().stringWidth(lines[i]);
-                    g2.drawString(lines[i], characterX - strW / 2, characterY - 20 - i * 60);
-                }
-            }
-        }
-
-        // --- Count-in ---
+        // ── Count-in ──────────────────────────────────────────────
         if (countingIn && beatIndex < beatText.length) {
             g2.setFont(hugeFont);
-            g2.setColor(new Color(255, 255, 255, 220));
             String countStr = beatText[beatIndex % beatText.length];
             int strW = g2.getFontMetrics().stringWidth(countStr);
-            g2.drawString(countStr, WIDTH/2 - strW/2, HEIGHT/2);
+            int cx2 = WIDTH / 2 - strW / 2;
+            int cy2 = HEIGHT / 2;
+            // Glow
+            g2.setColor(new Color(0, 255, 180, 40));
+            for (int ox = -6; ox <= 6; ox += 3)
+                g2.drawString(countStr, cx2 + ox, cy2);
+            g2.setColor(new Color(0, 255, 180, 220));
+            g2.drawString(countStr, cx2, cy2);
+            g2.setColor(new Color(255, 255, 255, 120));
+            g2.drawString(countStr, cx2, cy2);
         }
 
-        // --- Score HUD ---
+        // ── HUD ───────────────────────────────────────────────────
+        drawHUD(g2);
+
+        if (hitPose && System.currentTimeMillis() - hitPoseTimer > HIT_POSE_DURATION_MS)
+            hitPose = false;
+    } // end renderFrame
+
+    /** Draws a neon music note centred at (cx, cy). */
+    private void drawMusicNote(Graphics2D g2, int cx, int cy, Color color) {
+        int hw = NOTE_W / 2, hh = (int)(NOTE_H * 0.36);
+        java.awt.geom.AffineTransform old = g2.getTransform();
+        g2.translate(cx, cy);
+        g2.rotate(Math.toRadians(-18));
+
+        // Glow halo — wide, very transparent
+        g2.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), 35));
+        g2.fillOval(-hw - 10, -hh - 10, hw * 2 + 20, hh * 2 + 20);
+
+        // Mid glow
+        g2.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), 70));
+        g2.fillOval(-hw - 4, -hh - 4, hw * 2 + 8, hh * 2 + 8);
+
+        // Dark fill — note is mostly hollow/dark with bright edge
+        g2.setColor(new Color(4, 4, 8));
+        g2.fillOval(-hw, -hh, hw * 2, hh * 2);
+
+        // Bright neon outline
+        g2.setColor(color);
+        g2.setStroke(new java.awt.BasicStroke(2.5f));
+        g2.drawOval(-hw, -hh, hw * 2, hh * 2);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Small bright interior fill (core hotspot)
+        g2.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), 160));
+        g2.fillOval(-hw / 2, -hh / 2, hw, hh);
+
+        g2.setTransform(old);
+
+        // Stem
+        int stemX   = cx + (int)(NOTE_W * 0.28);
+        int stemBot = cy - (int)(NOTE_H * 0.28);
+        int stemTop = cy - NOTE_H - 4;
+
+        // Glow stroke
+        g2.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), 60));
+        g2.setStroke(new java.awt.BasicStroke(7f, java.awt.BasicStroke.CAP_ROUND,
+                java.awt.BasicStroke.JOIN_ROUND));
+        g2.drawLine(stemX, stemBot, stemX, stemTop);
+        // Bright core
+        g2.setColor(color);
+        g2.setStroke(new java.awt.BasicStroke(2.5f, java.awt.BasicStroke.CAP_ROUND,
+                java.awt.BasicStroke.JOIN_ROUND));
+        g2.drawLine(stemX, stemBot, stemX, stemTop);
+
+        // Flag
+        g2.setStroke(new java.awt.BasicStroke(2.5f, java.awt.BasicStroke.CAP_ROUND,
+                java.awt.BasicStroke.JOIN_ROUND));
+        g2.draw(new java.awt.geom.QuadCurve2D.Float(
+                stemX, stemTop,
+                stemX + 20, stemTop + 10,
+                stemX + 12, stemTop + 24
+        ));
+        g2.setStroke(new java.awt.BasicStroke(1f));
+    }
+
+    /** Placeholder character — neon cyber style. */
+    private void drawCharacter(Graphics2D g2, long now) {
+        int panelW = HIT_LINE_X;
+        int cx = panelW / 2;
+        int cy = HEIGHT / 2 + 10;
+
+        // Panel bg — near-black with faint neon teal tint
+        g2.setColor(new Color(2, 6, 10));
+        g2.fillRect(0, 0, panelW, HEIGHT);
+
+        // Vertical separator — neon line with glow
+        Color sep = LANE_COLORS[0];
+        for (int gx = 4; gx >= 0; gx--) {
+            g2.setColor(new Color(sep.getRed(), sep.getGreen(), sep.getBlue(),
+                    gx == 0 ? 200 : 15 * gx));
+            g2.setStroke(new java.awt.BasicStroke(gx * 2 + 1f));
+            g2.drawLine(panelW - 1, 0, panelW - 1, HEIGHT);
+        }
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Bob only while hit
+        int bob = hitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
+        cy += bob;
+
+        Color bodyNeon = hitPose ? LANE_COLORS[1] : LANE_COLORS[0]; // magenta on hit, teal idle
+        int r = bodyNeon.getRed(), gr2 = bodyNeon.getGreen(), b = bodyNeon.getBlue();
+
+        // Body outline — neon rectangle (no fill, just glow edge)
+        int bx = cx - 30, by = cy - 50, bw = 60, bh = 90;
+
+        // Glow
+        g2.setColor(new Color(r, gr2, b, 25));
+        g2.fillRoundRect(bx - 8, by - 8, bw + 16, bh + 16, 20, 20);
+        // Dark fill
+        g2.setColor(new Color(4, 4, 8));
+        g2.fillRoundRect(bx, by, bw, bh, 12, 12);
+        // Bright outline
+        g2.setColor(bodyNeon);
+        g2.setStroke(new java.awt.BasicStroke(2f));
+        g2.drawRoundRect(bx, by, bw, bh, 12, 12);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Hoodie detail lines
+        g2.setColor(new Color(r, gr2, b, 60));
+        g2.drawLine(cx - 10, by + 10, cx - 10, by + bh - 10);
+        g2.drawLine(cx + 10, by + 10, cx + 10, by + bh - 10);
+
+        // Head
+        g2.setColor(new Color(4, 4, 8));
+        g2.fillOval(cx - 24, cy - 100, 48, 48);
+        g2.setColor(bodyNeon);
+        g2.setStroke(new java.awt.BasicStroke(2f));
+        g2.drawOval(cx - 24, cy - 100, 48, 48);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Eyes — neon dots
+        g2.setColor(bodyNeon);
+        g2.fillOval(cx - 12, cy - 82, 7, 8);
+        g2.fillOval(cx + 5,  cy - 82, 7, 8);
+
+        // Cat ears — sharp triangles
+        Color earCol = hitPose ? LANE_COLORS[1] : LANE_COLORS[2];
+        int[] elx = { cx - 22, cx - 12, cx - 6  };
+        int[] ely = { cy - 114, cy - 126, cy - 102 };
+        int[] erx = { cx + 6,  cx + 12, cx + 22  };
+        int[] ery = { cy - 102, cy - 126, cy - 114 };
+        g2.setColor(new Color(4, 4, 8));
+        g2.fillPolygon(elx, ely, 3);
+        g2.fillPolygon(erx, ery, 3);
+        g2.setColor(earCol);
+        g2.setStroke(new java.awt.BasicStroke(2f));
+        g2.drawPolygon(elx, ely, 3);
+        g2.drawPolygon(erx, ery, 3);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Keytar — angular neon bar
+        Color kt = LANE_COLORS[3];
+        int kx = cx - 8, ky = cy + 28, kw = 68, kh = 16;
+        g2.setColor(new Color(4, 4, 8));
+        g2.fillRect(kx, ky, kw, kh);
+        g2.setColor(kt);
+        g2.setStroke(new java.awt.BasicStroke(2f));
+        g2.drawRect(kx, ky, kw, kh);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+        // Keys as neon lines
+        for (int k = 1; k < 7; k++) {
+            g2.setColor(new Color(kt.getRed(), kt.getGreen(), kt.getBlue(), 150));
+            g2.drawLine(kx + k * 9, ky + 2, kx + k * 9, ky + kh - 2);
+        }
+
+        // Name — neon label
         g2.setFont(ttfFont);
-        g2.setColor(Color.WHITE);
-        g2.drawString("Combo: " + combo, 15, 30);
-        g2.drawString("Perfect: " + perfectCount + "  Good: " + goodCount + "  Miss: " + missCount, 15, 60);
-        int totalHits = perfectCount + goodCount + missCount;
-        if (totalHits > 0) {
-            double accuracy = ((perfectCount * 1.0) + (goodCount * 0.7)) / totalHits * 100.0;
-            g2.drawString("Accuracy: " + String.format("%.2f", accuracy) + "%", 15, 90);
+        g2.setColor(new Color(r, gr2, b, 200));
+        String name = "WAVE";
+        int nw = g2.getFontMetrics().stringWidth(name);
+        // Glow
+        g2.setColor(new Color(r, gr2, b, 40));
+        for (int ox = -3; ox <= 3; ox++)
+            g2.drawString(name, cx - nw / 2 + ox, cy + 76);
+        g2.setColor(bodyNeon);
+        g2.drawString(name, cx - nw / 2, cy + 76);
+    }
+
+    /** Score + combo HUD — neon cyber style, top-right. */
+    private void drawHUD(Graphics2D g2) {
+        int pad = 16;
+        int bw  = 210;
+        int bh  = 86;
+        int rx  = WIDTH - bw - 10;
+        int ry  = 10;
+
+        // Dark panel, no rounded softness — hard rect
+        g2.setColor(new Color(2, 4, 8, 210));
+        g2.fillRect(rx, ry, bw, bh);
+
+        // Neon border — teal top+left, darker right+bottom (gives depth)
+        Color hc = LANE_COLORS[0];
+        g2.setColor(hc);
+        g2.setStroke(new java.awt.BasicStroke(1.5f));
+        g2.drawRect(rx, ry, bw, bh);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Corner accent marks
+        int cm = 10;
+        g2.setStroke(new java.awt.BasicStroke(2.5f));
+        g2.drawLine(rx, ry,      rx + cm, ry);
+        g2.drawLine(rx, ry,      rx,      ry + cm);
+        g2.drawLine(rx + bw, ry, rx + bw - cm, ry);
+        g2.drawLine(rx + bw, ry, rx + bw, ry + cm);
+        g2.setStroke(new java.awt.BasicStroke(1f));
+
+        // Score
+        int score = perfectCount * 300 + goodCount * 100;
+        String scoreStr = String.format("%08d", score);
+        g2.setFont(bigFont);
+        // Glow
+        g2.setColor(new Color(hc.getRed(), hc.getGreen(), hc.getBlue(), 50));
+        for (int ox = -3; ox <= 3; ox += 2)
+            g2.drawString(scoreStr, rx + bw - g2.getFontMetrics().stringWidth(scoreStr) - pad + ox, ry + 44);
+        // Solid
+        g2.setColor(hc);
+        g2.drawString(scoreStr, rx + bw - g2.getFontMetrics().stringWidth(scoreStr) - pad, ry + 44);
+
+        // Combo
+        if (combo > 0) {
+            g2.setFont(ttfFont);
+            Color cc = LANE_COLORS[1]; // magenta combo
+            String comboStr = combo + "  COMBO";
+            int cw = g2.getFontMetrics().stringWidth(comboStr);
+            g2.setColor(new Color(cc.getRed(), cc.getGreen(), cc.getBlue(), 40));
+            for (int ox = -2; ox <= 2; ox++)
+                g2.drawString(comboStr, rx + bw - cw - pad + ox, ry + 70);
+            g2.setColor(cc);
+            g2.drawString(comboStr, rx + bw - cw - pad, ry + 70);
         }
     }
 
@@ -623,18 +953,18 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                 candidate.holdStartMs = now;
                 judgementText = "HOLD!";
                 judgementTimer = System.currentTimeMillis();
-                spawnSparkle(lane, HIT_LINE_Y, 8);
+                spawnSparkle(lane, HIT_LINE_X, 8);
             } else {
                 combo++;
                 if (combo > maxCombo) maxCombo = combo;
                 if (offset <= PERFECT_WINDOW_MS) {
                     perfectCount++;
                     judgementText = "PERFECT";
-                    spawnSparkle(lane, HIT_LINE_Y, 16);
+                    spawnSparkle(lane, HIT_LINE_X, 16);
                 } else {
                     goodCount++;
                     judgementText = "GOOD";
-                    spawnSparkle(lane, HIT_LINE_Y, 8);
+                    spawnSparkle(lane, HIT_LINE_X, 8);
                 }
                 judgementTimer = System.currentTimeMillis();
                 hitPose = true;
@@ -645,7 +975,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                         : "WHACK!\nGOOD (" + offset + "ms)";
             }
 
-            characterX = candidate.lane * NOTE_WIDTH + NOTE_WIDTH / 2;
+            characterX = HIT_LINE_X / 2; // centre of left panel
             printScoreStats();
 
         } else {
@@ -687,6 +1017,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         int bpm = 149;
 
         MagicChartsAWT canvas = new MagicChartsAWT(useAutochart, audioFile, bpm);
+        canvas.setPreferredSize(new java.awt.Dimension(WIDTH, HEIGHT));
         canvas.setSize(WIDTH, HEIGHT);
         frame.add(canvas);
         frame.pack();
