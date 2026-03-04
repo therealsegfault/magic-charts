@@ -219,7 +219,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
         try {
             if (useAutochart && audioFile != null) {
-                List<Note> loadedNotes = autoChartFromAudio(audioFile, bpm);
+                List<Note> loadedNotes = autoChartFromAudio(audioFile, bpm, Difficulty.NORMAL);
                 long rawFirstHit = Long.MAX_VALUE;
                 for (Note n : loadedNotes) if (n.hitTimeMs < rawFirstHit) rawFirstHit = n.hitTimeMs;
                 long shift = APPROACH_TIME_MS - rawFirstHit;
@@ -330,7 +330,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         }
     }
 
-    public static List<Note> autoChartFromAudio(String file, int BPM) {
+    public static List<Note> autoChartFromAudio(String file, int BPM, Difficulty difficulty) {
         List<Note> notes = new ArrayList<>();
         try {
             javax.sound.sampled.AudioInputStream ais = javax.sound.sampled.AudioSystem.getAudioInputStream(new File(file));
@@ -365,42 +365,65 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
             double maxEnv = 0;
             for (double v : envelope) if (v > maxEnv) maxEnv = v;
             if (maxEnv > 0) for (int i = 0; i < envelope.length; i++) envelope[i] /= maxEnv;
-            double threshold = 0.04;
+
+            // Difficulty controls density and chord size
+            double threshold;
+            long   minSep;
+            int    maxChordSize;
+            switch (difficulty) {
+                case EASY   -> { threshold = 0.15; minSep = 300; maxChordSize = 1; }
+                case HARD   -> { threshold = 0.02; minSep =  60; maxChordSize = 2; }
+                default     -> { threshold = 0.06; minSep = 120; maxChordSize = 1; } // NORMAL
+            }
+
             List<Integer> peaks = new ArrayList<>();
             for (int i = 1; i < envelope.length - 1; i++) {
                 if (envelope[i] > threshold) { peaks.add(i); i += 4; }
             }
-            double msPerBeat  = 60000.0 / BPM;
-            double msPerSixteenth = msPerBeat / 4.0; // snap to 16th notes, not whole beats
+            double msPerBeat      = 60000.0 / BPM;
+            double msPerSixteenth = msPerBeat / 4.0;
             Set<Long> snapped = new HashSet<>();
             for (int idx : peaks) {
-                double timeMs = idx * windowSize * 1000.0 / sampleRate;
-                long snapIdx  = Math.round(timeMs / msPerSixteenth);
+                double timeMs  = idx * windowSize * 1000.0 / sampleRate;
+                long snapIdx   = Math.round(timeMs / msPerSixteenth);
                 long snappedMs = (long) Math.round(snapIdx * msPerSixteenth);
                 snapped.add(snappedMs);
             }
             List<Long> sorted = new ArrayList<>(snapped);
             sorted.sort(Long::compareTo);
-            long minSep = 60;
             List<Long> filtered = new ArrayList<>();
             long last = -minSep - 1;
             for (long t : sorted) {
                 if (t - last >= minSep) { filtered.add(t); last = t; }
             }
-            // Seed from filename so same song always gives same chart, but different songs differ
+
+            // Round-robin lane assignment — guarantees even distribution across all 4 keys
+            // Small random shuffle within a window so it doesn't feel mechanical
             Random rng = new Random(file.hashCode());
-            Map<Long, Set<Integer>> usedAtTime = new HashMap<>();
-            for (long t : filtered) {
-                int lane = rng.nextInt(LANES);
-                Set<Integer> used = usedAtTime.computeIfAbsent(t, k -> new HashSet<>());
-                if (used.contains(lane)) {
-                    for (int l = 0; l < LANES; l++) {
-                        if (!used.contains(l)) { lane = l; break; }
-                    }
-                }
-                used.add(lane);
-                notes.add(new Note(t, lane));
+            int[] laneOrder = {0, 1, 2, 3};
+            int laneIdx = 0;
+            // Shuffle the starting order per song
+            for (int i = 3; i > 0; i--) {
+                int j = rng.nextInt(i + 1);
+                int tmp = laneOrder[i]; laneOrder[i] = laneOrder[j]; laneOrder[j] = tmp;
             }
+
+            for (long t : filtered) {
+                int chordsAtTime = 1 + (maxChordSize > 1 && rng.nextFloat() < 0.2f ? 1 : 0);
+                Set<Integer> usedLanes = new HashSet<>();
+                for (int c = 0; c < chordsAtTime; c++) {
+                    // Advance round-robin, skip already used lanes
+                    int tries = 0;
+                    while (usedLanes.contains(laneOrder[laneIdx % LANES]) && tries < LANES) {
+                        laneIdx++; tries++;
+                    }
+                    int lane = laneOrder[laneIdx % LANES];
+                    laneIdx++;
+                    usedLanes.add(lane);
+                    notes.add(new Note(t, lane));
+                }
+            }
+            System.out.println("Autochart [" + difficulty + "]: " + notes.size() + " notes");
         } catch (Exception e) { e.printStackTrace(); }
         return notes;
     }
@@ -497,6 +520,19 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                 for (int i = 0; i < Math.min(maxChordSize, group.size()); i++)
                     finalNotes.add(group.get(i));
             }
+            finalNotes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+
+            // Enforce: after any hold note, all notes within MAX_HIT_WINDOW_MS must be taps
+            long lastHoldEndMs = -9999;
+            for (Note n : finalNotes) {
+                if (n.hitTimeMs - lastHoldEndMs < MAX_HIT_WINDOW_MS) {
+                    n.durationMs = 0; // force to tap
+                }
+                if (n.isHold()) {
+                    lastHoldEndMs = n.hitTimeMs + n.durationMs;
+                }
+            }
+
             loadedNotes = finalNotes;
 
         } catch (Exception e) { e.printStackTrace(); }
@@ -1043,7 +1079,7 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
     public static void main(String[] args) {
         JFrame frame = new JFrame("MagicCharts AWT");
-        boolean useAutochart = true;
+        boolean useAutochart = false;
         String audioFile = "assets/songs/hasurvoicebeentrulylockedaway.wav";
         int bpm = 149;
 
