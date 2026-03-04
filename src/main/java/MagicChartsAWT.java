@@ -11,6 +11,15 @@ import java.io.File;
 import javax.swing.*;
 import javax.sound.midi.*;
 import java.util.*;
+import javafx.application.Platform;
+import javafx.embed.swing.JFXPanel;
+import javafx.embed.swing.SwingFXUtils;
+import javafx.scene.Scene;
+import javafx.scene.layout.StackPane;
+import javafx.scene.media.Media;
+import javafx.scene.media.MediaPlayer;
+import javafx.scene.media.MediaView;
+import javafx.scene.image.WritableImage;
 
 public class MagicChartsAWT extends Canvas implements KeyListener {
 
@@ -77,6 +86,13 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
     // --- Double buffer ---
     BufferedImage offscreen = null;
+
+    // --- Background video ---
+    static final String BG_VIDEO_PATH = "assets/video/background.mp4";
+    MediaPlayer bgPlayer = null;
+    MediaView  bgView   = null;
+    JFXPanel   jfxPanel = null;   // bootstraps JavaFX runtime
+    volatile BufferedImage bgFrame = null; // latest decoded frame
 
     // --- Particles ---
     List<Particle> particles = new ArrayList<>();
@@ -230,6 +246,50 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         // ── TEST HOLD NOTE — remove once verified ──
         // notes.add(new Note(2000, 1000, 0)); // lane 0, hits at 2s, hold for 1s
         // notes.sort(Comparator.comparingLong(n -> n.hitTimeMs));
+
+        // ── Background video ──
+        initBackgroundVideo();
+    }
+
+    private void initBackgroundVideo() {
+        File videoFile = new File(BG_VIDEO_PATH);
+        if (!videoFile.exists()) return; // silently skip if no video present
+
+        // JFXPanel bootstraps the JavaFX runtime without needing Application.launch()
+        jfxPanel = new JFXPanel();
+
+        Platform.runLater(() -> {
+            try {
+                Media media = new Media(videoFile.toURI().toString());
+                bgPlayer = new MediaPlayer(media);
+                bgPlayer.setCycleCount(MediaPlayer.INDEFINITE); // loop forever
+                bgPlayer.setMute(true);                          // video is BG only, audio is separate
+                bgPlayer.setVolume(0);
+
+                bgView = new MediaView(bgPlayer);
+                bgView.setFitWidth(WIDTH);
+                bgView.setFitHeight(HEIGHT);
+                bgView.setPreserveRatio(false);
+
+                StackPane root = new StackPane(bgView);
+                root.setPrefSize(WIDTH, HEIGHT);
+                Scene scene = new Scene(root, WIDTH, HEIGHT);
+                jfxPanel.setScene(scene);
+
+                // Capture a frame every ~16ms (≈60fps) into bgFrame
+                bgPlayer.currentTimeProperty().addListener((obs, oldT, newT) -> {
+                    Platform.runLater(() -> {
+                        WritableImage fxImg = jfxPanel.getScene().snapshot(null);
+                        if (fxImg != null)
+                            bgFrame = SwingFXUtils.fromFXImage(fxImg, bgFrame);
+                    });
+                });
+
+                bgPlayer.play();
+            } catch (Exception e) {
+                System.err.println("Background video failed to load: " + e.getMessage());
+            }
+        });
     }
 
     // ── Sparkle helper ───────────────────────────────────────────
@@ -515,23 +575,21 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
 
     private void renderFrame(Graphics2D g2) {
 
-        // ── Background: near-black with faint perspective grid ─────
-        g2.setColor(new Color(4, 4, 8));
-        g2.fillRect(0, 0, WIDTH, HEIGHT);
-
-        // Perspective scanlines — horizontal, very faint
-        for (int y = 0; y < HEIGHT; y += 4) {
-            g2.setColor(new Color(255, 255, 255, y % 8 == 0 ? 6 : 2));
-            g2.drawLine(0, y, WIDTH, y);
+        // ── Background: video frame or fallback solid ──────────────
+        if (bgFrame != null) {
+            g2.drawImage(bgFrame, 0, 0, WIDTH, HEIGHT, null);
+            // Dark overlay so the game elements stay readable
+            g2.setColor(new Color(0, 0, 0, 120));
+            g2.fillRect(0, 0, WIDTH, HEIGHT);
+        } else {
+            g2.setColor(new Color(4, 4, 8));
+            g2.fillRect(0, 0, WIDTH, HEIGHT);
         }
-        // Vertical grid only in lane area, faint lane-coloured tint
-        for (int i = 0; i < LANES; i++) {
-            Color lc = LANE_COLORS[i];
-            for (int x = HIT_LINE_X; x < WIDTH; x += 60) {
-                g2.setColor(new Color(lc.getRed(), lc.getGreen(), lc.getBlue(), 8));
-                int laneY = LANE_TOP + i * LANE_HEIGHT;
-                g2.drawLine(x, laneY, x, laneY + LANE_HEIGHT);
-            }
+
+        // Scanlines over the top of video too
+        for (int y = 0; y < HEIGHT; y += 4) {
+            g2.setColor(new Color(0, 0, 0, y % 8 == 0 ? 40 : 15));
+            g2.drawLine(0, y, WIDTH, y);
         }
 
         long now = getCurrentTimeMs();
@@ -774,13 +832,13 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     private void drawCharacter(Graphics2D g2, long now) {
         int panelW = HIT_LINE_X;
         int cx = panelW / 2;
-        int cy = HEIGHT / 2 + 10;
+        int cy = HEIGHT / 2;
 
-        // Panel bg — near-black with faint neon teal tint
-        g2.setColor(new Color(2, 6, 10));
+        // Panel bg
+        g2.setColor(new Color(0, 0, 0, 160));
         g2.fillRect(0, 0, panelW, HEIGHT);
 
-        // Vertical separator — neon line with glow
+        // Neon separator line
         Color sep = LANE_COLORS[0];
         for (int gx = 4; gx >= 0; gx--) {
             g2.setColor(new Color(sep.getRed(), sep.getGreen(), sep.getBlue(),
@@ -790,87 +848,26 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         }
         g2.setStroke(new java.awt.BasicStroke(1f));
 
-        // Bob only while hit
-        int bob = hitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
-        cy += bob;
+        // Sprite — swap on hit
+        BufferedImage sprite = (hitPose && spriteHit != null) ? spriteHit
+                : (spriteGo != null)             ? spriteGo
+                : null;
 
-        Color bodyNeon = hitPose ? LANE_COLORS[1] : LANE_COLORS[0]; // magenta on hit, teal idle
-        int r = bodyNeon.getRed(), gr2 = bodyNeon.getGreen(), b = bodyNeon.getBlue();
-
-        // Body outline — neon rectangle (no fill, just glow edge)
-        int bx = cx - 30, by = cy - 50, bw = 60, bh = 90;
-
-        // Glow
-        g2.setColor(new Color(r, gr2, b, 25));
-        g2.fillRoundRect(bx - 8, by - 8, bw + 16, bh + 16, 20, 20);
-        // Dark fill
-        g2.setColor(new Color(4, 4, 8));
-        g2.fillRoundRect(bx, by, bw, bh, 12, 12);
-        // Bright outline
-        g2.setColor(bodyNeon);
-        g2.setStroke(new java.awt.BasicStroke(2f));
-        g2.drawRoundRect(bx, by, bw, bh, 12, 12);
-        g2.setStroke(new java.awt.BasicStroke(1f));
-
-        // Hoodie detail lines
-        g2.setColor(new Color(r, gr2, b, 60));
-        g2.drawLine(cx - 10, by + 10, cx - 10, by + bh - 10);
-        g2.drawLine(cx + 10, by + 10, cx + 10, by + bh - 10);
-
-        // Head
-        g2.setColor(new Color(4, 4, 8));
-        g2.fillOval(cx - 24, cy - 100, 48, 48);
-        g2.setColor(bodyNeon);
-        g2.setStroke(new java.awt.BasicStroke(2f));
-        g2.drawOval(cx - 24, cy - 100, 48, 48);
-        g2.setStroke(new java.awt.BasicStroke(1f));
-
-        // Eyes — neon dots
-        g2.setColor(bodyNeon);
-        g2.fillOval(cx - 12, cy - 82, 7, 8);
-        g2.fillOval(cx + 5,  cy - 82, 7, 8);
-
-        // Cat ears — sharp triangles
-        Color earCol = hitPose ? LANE_COLORS[1] : LANE_COLORS[2];
-        int[] elx = { cx - 22, cx - 12, cx - 6  };
-        int[] ely = { cy - 114, cy - 126, cy - 102 };
-        int[] erx = { cx + 6,  cx + 12, cx + 22  };
-        int[] ery = { cy - 102, cy - 126, cy - 114 };
-        g2.setColor(new Color(4, 4, 8));
-        g2.fillPolygon(elx, ely, 3);
-        g2.fillPolygon(erx, ery, 3);
-        g2.setColor(earCol);
-        g2.setStroke(new java.awt.BasicStroke(2f));
-        g2.drawPolygon(elx, ely, 3);
-        g2.drawPolygon(erx, ery, 3);
-        g2.setStroke(new java.awt.BasicStroke(1f));
-
-        // Keytar — angular neon bar
-        Color kt = LANE_COLORS[3];
-        int kx = cx - 8, ky = cy + 28, kw = 68, kh = 16;
-        g2.setColor(new Color(4, 4, 8));
-        g2.fillRect(kx, ky, kw, kh);
-        g2.setColor(kt);
-        g2.setStroke(new java.awt.BasicStroke(2f));
-        g2.drawRect(kx, ky, kw, kh);
-        g2.setStroke(new java.awt.BasicStroke(1f));
-        // Keys as neon lines
-        for (int k = 1; k < 7; k++) {
-            g2.setColor(new Color(kt.getRed(), kt.getGreen(), kt.getBlue(), 150));
-            g2.drawLine(kx + k * 9, ky + 2, kx + k * 9, ky + kh - 2);
+        if (sprite != null) {
+            int bob = hitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
+            int sw = sprite.getWidth();
+            int sh = sprite.getHeight();
+            g2.drawImage(sprite, cx - sw / 2, cy - sh / 2 + bob, sw, sh, null);
+        } else {
+            // Fallback if no sprites loaded — simple neon rectangle
+            g2.setColor(LANE_COLORS[0]);
+            g2.setStroke(new java.awt.BasicStroke(2f));
+            g2.drawRoundRect(cx - 30, cy - 60, 60, 100, 12, 12);
+            g2.setStroke(new java.awt.BasicStroke(1f));
+            g2.setFont(ttfFont);
+            g2.setColor(LANE_COLORS[0]);
+            g2.drawString("WAVE", cx - 20, cy + 70);
         }
-
-        // Name — neon label
-        g2.setFont(ttfFont);
-        g2.setColor(new Color(r, gr2, b, 200));
-        String name = "WAVE";
-        int nw = g2.getFontMetrics().stringWidth(name);
-        // Glow
-        g2.setColor(new Color(r, gr2, b, 40));
-        for (int ox = -3; ox <= 3; ox++)
-            g2.drawString(name, cx - nw / 2 + ox, cy + 76);
-        g2.setColor(bodyNeon);
-        g2.drawString(name, cx - nw / 2, cy + 76);
     }
 
     /** Score + combo HUD — neon cyber style, top-right. */
@@ -1034,6 +1031,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                     canvas.audioClip.stop();
                     canvas.audioClip.close();
                 }
+                if (canvas.bgPlayer != null)
+                    Platform.runLater(() -> canvas.bgPlayer.stop());
             }
         });
 
