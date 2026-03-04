@@ -67,6 +67,8 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
     boolean hitPose = false;
     long hitPoseTimer = 0;
     static final long HIT_POSE_DURATION_MS = 150;
+    boolean waveHitPose = false;   // only true on lane 0 PERFECT/GOOD hits
+    long waveHitPoseTimer = 0;
     int characterX = HIT_LINE_X / 2;
     int characterY = HEIGHT / 2;
     String hitText = "";
@@ -862,16 +864,19 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
         }
         g2.setStroke(new java.awt.BasicStroke(1f));
 
-        // Sprite — swap on hit
-        BufferedImage sprite = (hitPose && spriteHit != null) ? spriteHit
-                : (spriteGo != null)             ? spriteGo
+        // Sprite — swap on Wave's lane (lane 0) PERFECT/GOOD hits only
+        BufferedImage sprite = (waveHitPose && spriteHit != null) ? spriteHit
+                : (spriteGo != null)                 ? spriteGo
                 : null;
 
         if (sprite != null) {
-            int bob = hitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
-            int sw = hitPose ? sprite.getWidth()  * 2 : sprite.getWidth();
-            int sh = hitPose ? sprite.getHeight() * 2 : sprite.getHeight();
+            int bob = waveHitPose ? (int)(Math.sin(System.currentTimeMillis() * 0.04) * 5) : 0;
+            int sw = waveHitPose ? sprite.getWidth()  * 2 : sprite.getWidth();
+            int sh = waveHitPose ? sprite.getHeight() * 2 : sprite.getHeight();
             g2.drawImage(sprite, cx - sw / 2, cy - sh / 2 + bob, sw, sh, null);
+            // expire
+            if (waveHitPose && System.currentTimeMillis() - waveHitPoseTimer > HIT_POSE_DURATION_MS)
+                waveHitPose = false;
         } else {
             // Fallback if no sprites loaded — simple neon rectangle
             g2.setColor(LANE_COLORS[0]);
@@ -984,6 +989,11 @@ public class MagicChartsAWT extends Canvas implements KeyListener {
                 hitText = offset <= PERFECT_WINDOW_MS
                         ? "WHACK!\nPERFECT (" + offset + "ms)"
                         : "WHACK!\nGOOD (" + offset + "ms)";
+                // Wave reacts only to her own lane (lane 0)
+                if (lane == 0) {
+                    waveHitPose = true;
+                    waveHitPoseTimer = System.currentTimeMillis();
+                }
             }
 
             characterX = HIT_LINE_X / 2; // centre of left panel
